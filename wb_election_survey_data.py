@@ -3,6 +3,7 @@ import geopandas as gpd
 from shapely.geometry import Polygon
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
+from geopy.distance import geodesic
 import pyproj
 from pyproj import Geod
 from pyproj import CRS, Transformer
@@ -66,18 +67,22 @@ def perform_spatial_join(gdf_polling_clipped, lokniti_localities):
     lokniti_buffered = lokniti_localities.set_geometry('buffered_geometry')
     return gpd.sjoin(gdf_polling_clipped, lokniti_buffered, how='inner', predicate='intersects')
 
-def calculate_distance_column(gdf_polling_survey_joined):
-    wgs84_crs = CRS.from_epsg(4326)
-    utm_crs = CRS.from_epsg(32633)  # UTM Zone 33N
-    projector = Transformer.from_crs(wgs84_crs, utm_crs, always_xy=True)
+
+def calculate_distances_between_points(gdf_polling_survey_joined):
 
     def calculate_distance(row):
-        point1_utm = projector.transform(row['geometry_left'].x, row['geometry_left'].y)
-        point2_utm = projector.transform(row['geometry_right'].x, row['geometry_right'].y)
-        distance_meters = ((point1_utm[0] - point2_utm[0]) ** 2 + (point1_utm[1] - point2_utm[1]) ** 2) ** 0.5
-        return distance_meters / 1000  # Convert to kilometers
+        # Extract the coordinates from the two Point columns in the row
+        point1 = (row['geometry_left'].y, row['geometry_left'].x)
+        point2 = (row['geometry_right'].y, row['geometry_right'].x)
+        
+        # Calculate the geodesic distance in kilometers
+        distance_km = geodesic(point1, point2).kilometers
+        
+        return distance_km
+    # Apply the calculate_distance function to each row in the DataFrame
+    distances = gdf_polling_survey_joined.apply(calculate_distance, axis=1)
 
-    gdf_polling_survey_joined['distance_km'] = gdf_polling_survey_joined.apply(calculate_distance, axis=1)
+    gdf_polling_survey_joined['distance_km'] = distances
     return gdf_polling_survey_joined
 
 def main():
@@ -94,14 +99,28 @@ def main():
 
     lokniti_localities['buffered_geometry'] = create_buffers(lokniti_localities, buffer_distance=buffer_distance)
     wb_state = gpd.read_file(wb_state_path)
-    #visualize_data(wb_state, gdf_polling_clipped, lokniti_localities)
+    visualize_data(wb_state, gdf_polling_clipped, lokniti_localities)
 
     gdf_polling_survey_joined = perform_spatial_join(gdf_polling_clipped, lokniti_localities)
-    gdf_polling_survey_joined = calculate_distance_column(gdf_polling_survey_joined)
+    gdf_polling_survey_joined = calculate_distances_between_points(gdf_polling_survey_joined)
 
     gdf_polling_survey_joined.to_csv('localities_polling_joined.csv')
 
-    print(gdf_polling_survey_joined['distance_km'].describe())
+    distance_stats = gdf_polling_survey_joined['distance_km'].describe()
+    print("Descriptive stat for distance_km:")
+    print(distance_stats)
+
+    # Average frequency of polling booth per locality type
+    frequency_per_loca = (
+        gdf_polling_survey_joined
+        .groupby(['loca', 'psu_id'])
+        .size()
+        .reset_index(name='frequency')
+        .groupby('loca')['frequency']
+        .mean()
+    )
+    print("Average frequency of polling booth per locality type")
+    print(frequency_per_loca)
 
 if __name__ == "__main__":
     survey_file_path = 'lokniti_respondents/lokniti_respondents.shp'
